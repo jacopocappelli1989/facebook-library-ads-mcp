@@ -12,6 +12,7 @@ from pathlib import Path
 
 from mcp.server.fastmcp import FastMCP
 
+from . import prompts as _prompts
 from .client import set_token
 from .tools import register_all
 
@@ -30,6 +31,7 @@ def _load_dotenv_if_present() -> None:
 
 mcp = FastMCP("facebook-ads-library")
 register_all(mcp)
+_prompts.register(mcp)
 
 
 def main() -> None:

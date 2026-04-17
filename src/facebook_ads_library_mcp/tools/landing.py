@@ -48,15 +48,39 @@ ECOM_GENERIC = [
     "free shipping", "in stock", "out of stock", "sku", "add_to_cart",
 ]
 
-# Cash on delivery signals (multi-language: EN, IT, FR, ES, PT, AR, HI)
+# Cash on delivery signals (multi-language)
 COD_SIGNALS = [
+    # EN
     "cash on delivery", "pay on delivery", "c.o.d.", " cod ",
-    "pagamento alla consegna", "contrassegno",
+    "cod available", "pay when you receive",
+    # IT
+    "pagamento alla consegna", "contrassegno", "paga alla consegna",
+    # FR
     "paiement à la livraison", "paiement a la livraison",
-    "pago contra entrega", "contra reembolso",
-    "pagamento na entrega",
+    "contre remboursement",
+    # ES
+    "pago contra entrega", "contra reembolso", "pago al recibir",
+    # PT
+    "pagamento na entrega", "pagar na entrega",
+    # DE
+    "nachnahme", "zahlung bei lieferung", "bei lieferung bezahlen",
+    # PL
+    "za pobraniem", "płatność przy odbiorze", "platnosc przy odbiorze",
+    "zapłać przy odbiorze",
+    # NL
+    "rembours", "betaling bij aflevering",
+    # SE/NO/DK
+    "betala vid leverans", "betal ved levering",
+    # RO
+    "ramburs", "plata la livrare",
+    # RU
+    "наложенным платежом", "оплата при получении",
+    # AR
     "الدفع عند الاستلام",
+    # HI
     "कैश ऑन डिलीवरी",
+    # TR
+    "kapıda ödeme",
 ]
 
 # Form fields expected on a typical COD landing
@@ -121,6 +145,192 @@ def _has_form(html: str) -> bool:
     return bool(re.search(r"<form[\s>]", html, flags=re.IGNORECASE))
 
 
+# Price extraction.
+# Regex matches patterns like: "€12,99", "12.99 EUR", "$1,234.56", "49 zł", "1299 PLN".
+# Handles decimal separators `.` and `,`, optional thousands separators, and either
+# currency-prefix or currency-suffix layouts.
+_CURRENCY_SYMBOLS = {
+    "$": "USD",
+    "€": "EUR",
+    "£": "GBP",
+    "¥": "JPY",
+    "₽": "RUB",
+    "₺": "TRY",
+    "₹": "INR",
+    "zł": "PLN",
+    "Kč": "CZK",
+    "kr": "SEK",
+    "R$": "BRL",
+}
+
+_CURRENCY_CODES = {
+    "USD", "EUR", "GBP", "JPY", "RUB", "TRY", "INR", "PLN", "CZK", "SEK",
+    "BRL", "CHF", "AUD", "CAD", "NZD", "NOK", "DKK", "RON", "HUF", "BGN",
+    "HRK", "ILS", "AED", "SAR", "MXN", "COP", "CLP", "ARS",
+}
+
+_PRICE_RE_SYMBOL_PREFIX = re.compile(
+    r"(R\$|zł|Kč|kr|[$€£¥₽₺₹])\s*(\d{1,3}(?:[.,\s]\d{3})*(?:[.,]\d{1,2})?)",
+    flags=re.IGNORECASE,
+)
+_PRICE_RE_SYMBOL_SUFFIX = re.compile(
+    r"(\d{1,3}(?:[.,\s]\d{3})*(?:[.,]\d{1,2})?)\s*(zł|Kč|kr|R\$|[$€£¥₽₺₹])",
+    flags=re.IGNORECASE,
+)
+_PRICE_RE_CODE_SUFFIX = re.compile(
+    r"(\d{1,3}(?:[.,\s]\d{3})*(?:[.,]\d{1,2})?)\s*(USD|EUR|GBP|JPY|RUB|TRY|INR|PLN|CZK|SEK|BRL|CHF|AUD|CAD|NZD|NOK|DKK|RON|HUF|BGN|HRK|ILS|AED|SAR|MXN|COP|CLP|ARS)\b"
+)
+_PRICE_RE_CODE_PREFIX = re.compile(
+    r"(USD|EUR|GBP|JPY|RUB|TRY|INR|PLN|CZK|SEK|BRL|CHF|AUD|CAD|NZD|NOK|DKK|RON|HUF|BGN|HRK|ILS|AED|SAR|MXN|COP|CLP|ARS)\s*(\d{1,3}(?:[.,\s]\d{3})*(?:[.,]\d{1,2})?)"
+)
+
+
+def _parse_price_number(raw: str) -> float | None:
+    """Normalise a raw price string to a float.
+
+    Handles European (`1.299,99` or `1 299,99`), US (`1,299.99`), and plain
+    (`1299.99`, `1299,99`) formats. Falls back to None if ambiguous.
+    """
+    s = raw.strip().replace(" ", "")
+    if not s:
+        return None
+    if "," in s and "." in s:
+        # Whichever separator comes last is the decimal one.
+        if s.rfind(",") > s.rfind("."):
+            s = s.replace(".", "").replace(",", ".")
+        else:
+            s = s.replace(",", "")
+    elif "," in s:
+        # Use `,` as decimal if it plausibly separates ≤2 fractional digits.
+        if re.match(r"^\d+,\d{1,2}$", s):
+            s = s.replace(",", ".")
+        else:
+            s = s.replace(",", "")
+    try:
+        return float(s)
+    except ValueError:
+        return None
+
+
+def _normalise_currency(raw: str) -> str | None:
+    r = raw.strip()
+    if r in _CURRENCY_SYMBOLS:
+        return _CURRENCY_SYMBOLS[r]
+    upper = r.upper()
+    if upper in _CURRENCY_CODES:
+        return upper
+    return _CURRENCY_SYMBOLS.get(r, None)
+
+
+def _extract_prices(html: str, max_items: int = 40) -> list[dict[str, Any]]:
+    """Scan the HTML for price-like substrings. Returns unique entries by
+    (value, currency) pair, preserving the original match text."""
+    seen: set[tuple[float, str]] = set()
+    out: list[dict[str, Any]] = []
+
+    def _try_add(raw_num: str, cur_raw: str) -> None:
+        value = _parse_price_number(raw_num)
+        currency = _normalise_currency(cur_raw)
+        if value is None or currency is None or value <= 0:
+            return
+        key = (round(value, 2), currency)
+        if key in seen:
+            return
+        seen.add(key)
+        out.append({"value": round(value, 2), "currency": currency, "raw": f"{raw_num} {cur_raw}".strip()})
+
+    for match in _PRICE_RE_SYMBOL_PREFIX.finditer(html):
+        _try_add(match.group(2), match.group(1))
+        if len(out) >= max_items:
+            return out
+    for match in _PRICE_RE_SYMBOL_SUFFIX.finditer(html):
+        _try_add(match.group(1), match.group(2))
+        if len(out) >= max_items:
+            return out
+    for match in _PRICE_RE_CODE_SUFFIX.finditer(html):
+        _try_add(match.group(1), match.group(2))
+        if len(out) >= max_items:
+            return out
+    for match in _PRICE_RE_CODE_PREFIX.finditer(html):
+        _try_add(match.group(2), match.group(1))
+        if len(out) >= max_items:
+            return out
+    return out
+
+
+def _primary_price(prices: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """Heuristic: pick the most common currency, then the *median* price in
+    that currency (more robust than mean to shipping/discount noise)."""
+    if not prices:
+        return None
+    from collections import Counter
+
+    counter: Counter[str] = Counter(p["currency"] for p in prices)
+    primary_currency, _ = counter.most_common(1)[0]
+    values = sorted(p["value"] for p in prices if p["currency"] == primary_currency)
+    median = values[len(values) // 2]
+    return {"value": median, "currency": primary_currency}
+
+
+_OG_TITLE_RE = re.compile(
+    r"<meta[^>]+property=[\"']og:title[\"'][^>]+content=[\"']([^\"']+)[\"']",
+    flags=re.IGNORECASE,
+)
+_H1_RE = re.compile(r"<h1[^>]*>(.*?)</h1>", flags=re.IGNORECASE | re.DOTALL)
+_TAGS_RE = re.compile(r"<[^>]+>")
+
+
+def _extract_product_name(html: str, fallback_title: str) -> str:
+    m = _OG_TITLE_RE.search(html)
+    if m:
+        return m.group(1).strip()[:300]
+    m = _H1_RE.search(html)
+    if m:
+        return _TAGS_RE.sub("", m.group(1)).strip()[:300]
+    return fallback_title[:300]
+
+
+def _domain_of(url: str) -> str:
+    from urllib.parse import urlparse
+
+    try:
+        host = urlparse(url).netloc.lower()
+        return host.removeprefix("www.")
+    except (ValueError, AttributeError):
+        return ""
+
+
+_SCRIPT_STYLE_RE = re.compile(
+    r"<(script|style|noscript|svg)\b[^>]*>.*?</\1>",
+    flags=re.IGNORECASE | re.DOTALL,
+)
+_WS_RE = re.compile(r"[ \t]+")
+_MULTI_NL_RE = re.compile(r"\n{3,}")
+
+
+def _visible_text(html: str, max_chars: int = 8000) -> str:
+    """Strip scripts/styles/tags and collapse whitespace into a readable excerpt.
+
+    The excerpt is meant to be short enough to send back to a calling LLM for
+    semantic extraction (angle, USP, UMP, bundles, mechanism, etc.) without
+    blowing up the caller's context window.
+    """
+    cleaned = _SCRIPT_STYLE_RE.sub(" ", html)
+    cleaned = _TAGS_RE.sub("\n", cleaned)
+    cleaned = cleaned.replace("&nbsp;", " ").replace("&amp;", "&")
+    cleaned = cleaned.replace("&lt;", "<").replace("&gt;", ">").replace("&quot;", '"')
+    lines = [_WS_RE.sub(" ", ln).strip() for ln in cleaned.splitlines()]
+    lines = [ln for ln in lines if ln]
+    excerpt = "\n".join(lines)
+    excerpt = _MULTI_NL_RE.sub("\n\n", excerpt)
+    if len(excerpt) > max_chars:
+        # Head + tail sampling keeps hero + CTA/footer context.
+        head = excerpt[: int(max_chars * 0.7)]
+        tail = excerpt[-int(max_chars * 0.3):]
+        excerpt = f"{head}\n\n[...truncated...]\n\n{tail}"
+    return excerpt
+
+
 def register(mcp: FastMCP) -> None:
     @mcp.tool()
     async def analyze_landing_page(
@@ -130,12 +340,23 @@ def register(mcp: FastMCP) -> None:
         timeout_seconds: float = 20.0,
         cache_ttl_seconds: int = 604800,
         force_refresh: bool = False,
+        include_text_excerpt: bool = True,
+        text_excerpt_max_chars: int = 8000,
     ) -> dict[str, Any]:
-        """Fetch `url` and classify the landing page into ecommerce / COD-form /
-        advertorial / quiz / listicle categories based on HTML heuristics.
+        """Fetch `url`, classify the landing page, and extract structured fields.
+
+        Classifies into: **ecommerce** (Shopify/Woo/Magento/Wix/ClickFunnels/…),
+        **cod_form**, **advertorial**, **quiz**, **listicle**.
+
+        Extracts: `prices[]`, `primary_price`, `currency`, `domain`,
+        `product_name`, `cod_present` bool, `title`, detected platforms.
+
+        If `include_text_excerpt=True`, returns a cleaned visible-text excerpt
+        (`text_excerpt`) so the calling LLM can do semantic extraction of
+        offer/angle/USP/UMP/bundles/guarantees in its own reasoning step.
 
         Cached locally for `cache_ttl_seconds` (default 7 days). Pass
-        `force_refresh=True` to re-fetch even if a fresh cache entry exists.
+        `force_refresh=True` to re-fetch.
         """
         if not force_refresh and cache_ttl_seconds > 0:
             hit = cache.get_landing_analysis(url, cache_ttl_seconds)
@@ -157,6 +378,7 @@ def register(mcp: FastMCP) -> None:
 
         title_match = re.search(r"<title[^>]*>(.*?)</title>", html, flags=re.IGNORECASE | re.DOTALL)
         title = (title_match.group(1).strip() if title_match else "")[:300]
+        domain = _domain_of(final_url)
 
         platforms = _detect_platform(html)
         ecom_generic_score, ecom_hits = _count_hits(html, ECOM_GENERIC)
@@ -172,6 +394,7 @@ def register(mcp: FastMCP) -> None:
         is_quiz = quiz_score >= 2 and has_form
         is_listicle = listicle_score >= 2 and len(html) > 5000
         is_advertorial = adv_score >= 2 and len(html) > 5000
+        cod_present = cod_text_score >= 1 or cod_form_score >= 3
 
         labels: list[str] = []
         if is_ecommerce:
@@ -187,13 +410,23 @@ def register(mcp: FastMCP) -> None:
         if not labels:
             labels.append("unclassified")
 
-        result = {
+        prices = _extract_prices(html)
+        primary = _primary_price(prices)
+        product_name = _extract_product_name(html, title)
+
+        result: dict[str, Any] = {
             "url": url,
             "final_url": final_url,
+            "domain": domain,
             "http_status": resp.status_code,
             "title": title,
+            "product_name": product_name,
             "labels": labels,
             "has_form": has_form,
+            "cod_present": cod_present,
+            "prices": prices,
+            "primary_price": primary,
+            "currency": primary["currency"] if primary else None,
             "ecommerce": {
                 "is_ecommerce": is_ecommerce,
                 "platforms_detected": platforms,
@@ -224,5 +457,7 @@ def register(mcp: FastMCP) -> None:
             },
             "html_bytes": len(html),
         }
+        if include_text_excerpt:
+            result["text_excerpt"] = _visible_text(html, max_chars=text_excerpt_max_chars)
         cache.save_landing_analysis(url, result)
         return result

@@ -40,8 +40,18 @@ CREATE INDEX IF NOT EXISTS ix_ads_page_name ON ads(page_name);
 CREATE TABLE IF NOT EXISTS landing_analyses (
     url TEXT PRIMARY KEY,
     analysis TEXT NOT NULL,
-    analyzed_at INTEGER NOT NULL
+    analyzed_at INTEGER NOT NULL,
+    domain TEXT,
+    primary_price REAL,
+    currency TEXT,
+    cod_present INTEGER,
+    labels TEXT,
+    product_name TEXT
 );
+CREATE INDEX IF NOT EXISTS ix_landing_domain ON landing_analyses(domain);
+CREATE INDEX IF NOT EXISTS ix_landing_currency ON landing_analyses(currency);
+CREATE INDEX IF NOT EXISTS ix_landing_cod ON landing_analyses(cod_present);
+CREATE INDEX IF NOT EXISTS ix_landing_price ON landing_analyses(primary_price);
 
 CREATE TABLE IF NOT EXISTS page_stats_cache (
     cache_key TEXT PRIMARY KEY,
@@ -71,12 +81,31 @@ def db_path() -> Path:
     return cache_dir() / "cache.db"
 
 
+# Columns added after v0.1.0 — applied as ALTER TABLE on existing databases.
+_LANDING_MIGRATIONS: list[tuple[str, str]] = [
+    ("domain", "TEXT"),
+    ("primary_price", "REAL"),
+    ("currency", "TEXT"),
+    ("cod_present", "INTEGER"),
+    ("labels", "TEXT"),
+    ("product_name", "TEXT"),
+]
+
+
+def _migrate(c: sqlite3.Connection) -> None:
+    existing = {row["name"] for row in c.execute("PRAGMA table_info(landing_analyses)")}
+    for col, decl in _LANDING_MIGRATIONS:
+        if col not in existing:
+            c.execute(f"ALTER TABLE landing_analyses ADD COLUMN {col} {decl}")
+
+
 @contextmanager
 def _conn() -> Iterator[sqlite3.Connection]:
     c = sqlite3.connect(db_path())
     c.row_factory = sqlite3.Row
     try:
         c.executescript(SCHEMA)
+        _migrate(c)
         yield c
         c.commit()
     finally:
@@ -170,11 +199,81 @@ def get_landing_analysis(url: str, max_age_seconds: int) -> dict[str, Any] | Non
 
 
 def save_landing_analysis(url: str, analysis: dict[str, Any]) -> None:
+    domain = analysis.get("domain") or ""
+    primary = analysis.get("primary_price") or {}
+    primary_price = primary.get("value") if isinstance(primary, dict) else None
+    currency = analysis.get("currency")
+    cod_present = 1 if analysis.get("cod_present") else 0
+    labels = ",".join(analysis.get("labels") or [])
+    product_name = analysis.get("product_name") or ""
     with _conn() as c:
         c.execute(
-            "INSERT OR REPLACE INTO landing_analyses(url, analysis, analyzed_at) VALUES (?, ?, ?)",
-            (url, json.dumps(analysis, ensure_ascii=False), int(time.time())),
+            """
+            INSERT OR REPLACE INTO landing_analyses(
+                url, analysis, analyzed_at,
+                domain, primary_price, currency, cod_present, labels, product_name
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                url,
+                json.dumps(analysis, ensure_ascii=False),
+                int(time.time()),
+                domain,
+                primary_price,
+                currency,
+                cod_present,
+                labels,
+                product_name,
+            ),
         )
+
+
+def search_landings(
+    *,
+    domain: str | None = None,
+    domain_contains: str | None = None,
+    price_min: float | None = None,
+    price_max: float | None = None,
+    currency: str | None = None,
+    cod_present: bool | None = None,
+    label: str | None = None,
+    since_seconds_ago: int | None = None,
+    limit: int = 200,
+) -> list[dict[str, Any]]:
+    """Query cached landing analyses by structured columns."""
+    sql = "SELECT analysis FROM landing_analyses WHERE 1=1"
+    args: list[Any] = []
+    if domain:
+        sql += " AND domain = ?"
+        args.append(domain)
+    if domain_contains:
+        sql += " AND domain LIKE ?"
+        args.append(f"%{domain_contains.lower()}%")
+    if price_min is not None:
+        sql += " AND primary_price >= ?"
+        args.append(price_min)
+    if price_max is not None:
+        sql += " AND primary_price <= ?"
+        args.append(price_max)
+    if currency:
+        sql += " AND currency = ?"
+        args.append(currency.upper())
+    if cod_present is not None:
+        sql += " AND cod_present = ?"
+        args.append(1 if cod_present else 0)
+    if label:
+        sql += " AND labels LIKE ?"
+        args.append(f"%{label}%")
+    if since_seconds_ago:
+        cutoff = int(time.time()) - since_seconds_ago
+        sql += " AND analyzed_at >= ?"
+        args.append(cutoff)
+    sql += " ORDER BY analyzed_at DESC LIMIT ?"
+    args.append(limit)
+    with _conn() as c:
+        rows = c.execute(sql, args).fetchall()
+    return [json.loads(r["analysis"]) for r in rows]
 
 
 # ---------- page stats ---------------------------------------------------- #

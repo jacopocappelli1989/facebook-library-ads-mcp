@@ -93,3 +93,42 @@ def register(mcp: FastMCP) -> None:
             "truncated_to_max_results": truncated,
             "data": filtered,
         }
+
+    @mcp.tool()
+    def search_cached_landings(
+        domain: str | None = None,
+        domain_contains: str | None = None,
+        price_min: float | None = None,
+        price_max: float | None = None,
+        currency: str | None = None,
+        cod_present: bool | None = None,
+        label: str | None = None,
+        since_seconds_ago: int | None = None,
+        limit: int = 200,
+        include_text_excerpt: bool = False,
+    ) -> dict[str, Any]:
+        """Query cached landing analyses by structured fields.
+
+        Filters: `domain` (exact), `domain_contains`, `price_min`/`price_max`,
+        `currency` (ISO code), `cod_present` (bool), `label` (one of
+        `ecommerce`, `cod_form`, `quiz`, `listicle`, `advertorial`),
+        `since_seconds_ago` (TTL cutoff on analyzed_at).
+
+        Returns stripped landing rows (omits `text_excerpt` by default to keep
+        the payload small — set `include_text_excerpt=True` to include it).
+        """
+        rows = cache.search_landings(
+            domain=domain,
+            domain_contains=domain_contains,
+            price_min=price_min,
+            price_max=price_max,
+            currency=currency,
+            cod_present=cod_present,
+            label=label,
+            since_seconds_ago=since_seconds_ago,
+            limit=limit,
+        )
+        if not include_text_excerpt:
+            for r in rows:
+                r.pop("text_excerpt", None)
+        return {"count": len(rows), "data": rows}
