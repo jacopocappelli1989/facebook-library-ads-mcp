@@ -14,6 +14,9 @@ def register_all(mcp: FastMCP) -> None:
         export,
         landing,
         search,
+        shopify,
+        trends,
+        validate,
     )
 
     search.register(mcp)
@@ -23,3 +26,6 @@ def register_all(mcp: FastMCP) -> None:
     advanced.register(mcp)
     landing.register(mcp)
     cache_admin.register(mcp)
+    shopify.register(mcp)
+    trends.register(mcp)
+    validate.register(mcp)

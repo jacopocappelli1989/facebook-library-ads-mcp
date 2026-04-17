@@ -44,6 +44,45 @@ def register(mcp: FastMCP) -> None:
         )
 
     @mcp.prompt()
+    def validate_product_semantics(text_excerpt: str, ads_sample: str = "") -> str:
+        """Evaluate a product against the soft / semantic validation criteria
+        that can't be checked by regex or API (urgency, audience, custom-vs-
+        sourced, portability, avatar count, TAM reasoning).
+
+        Pair this with `validate_competitor` (hard criteria) and
+        `extract_offer` (offer breakdown) for a complete scorecard.
+        """
+        return (
+            "You are validating a product against these *semantic* criteria.\n"
+            "Use only the evidence in the landing text excerpt (and optional ad "
+            "samples) below. If evidence is missing or weak, return `null` with "
+            "a short note — do not speculate.\n\n"
+            "Return a JSON object with one entry per criterion:\n"
+            "- `urgent_daily_problem`: does the product solve a problem someone "
+            "faces every day and would act on immediately? "
+            "{verdict: yes|no|unclear, evidence: str|null, confidence: 0-1}\n"
+            "- `improves_passionate_community_experience`: does it elevate a "
+            "core experience for a 35+ passionate community? Identify the "
+            "community. {verdict, community: str|null, evidence, confidence}\n"
+            "- `small_and_portable`: could a 60-year-old woman comfortably hold "
+            "it with two hands? Infer from copy + imagery hints. {verdict, evidence, confidence}\n"
+            "- `not_custom_product`: is this a stock/sourceable SKU (vs a "
+            "bespoke / made-to-order item)? {verdict, evidence, confidence}\n"
+            "- `customer_avatars`: list 5+ distinct customer avatars you could "
+            "credibly speak to with this product; if <5, say so. {avatars: "
+            "list[{name, pain_point, trigger_moment}], count: int}\n"
+            "- `tam_growth_hypothesis`: based on the niche, give a qualitative "
+            "TAM assessment (small / medium / large) and note any growth "
+            "signals you can infer from the copy (new-category language, "
+            "rising-tide trends, etc.). {tam: str, growth_hypothesis: str, "
+            "confidence, note_on_external_data_needed: str}\n"
+            "- `likely_not_seasonal`: does the copy or positioning tie to a "
+            "season/holiday? {verdict, evidence, confidence}\n\n"
+            f"--- LANDING TEXT EXCERPT ---\n{text_excerpt}\n--- END ---\n"
+            f"--- AD SAMPLES (optional) ---\n{ads_sample or '(none provided)'}\n--- END ---"
+        )
+
+    @mcp.prompt()
     def extract_offer(text_excerpt: str) -> str:
         """Instructs the assistant to extract an offer/angle/USP breakdown from a
         landing-page `text_excerpt` returned by `analyze_landing_page`."""
