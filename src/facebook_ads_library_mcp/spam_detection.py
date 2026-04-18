@@ -175,3 +175,41 @@ def classify_grouped_ads(ads: list[dict[str, Any]]) -> dict[str, dict[str, Any]]
         if cls["is_spam"]:
             out[pid] = {"page_name": names.get(pid, ""), **cls}
     return out
+
+
+def auto_block_recommendation(
+    ads_from_page: list[dict[str, Any]],
+) -> tuple[bool, str | None, dict[str, Any]]:
+    """Stricter version of `classify_page` for auto-blocking on save.
+
+    Run after every ad batch is written to the cache. Uses higher thresholds
+    than the manual scan so false positives on legitimate DTC brands are
+    minimised — the manual `scan_cache_for_spam` tool remains available with
+    looser limits for aggressive cleanups.
+
+    Requires ≥5 ads sampled before it considers blocking at all.
+    """
+    if len(ads_from_page) < 5:
+        return False, None, {"ads_sampled": len(ads_from_page), "skipped": "too_few_ads"}
+
+    novel_score, novel_hits = novel_vocab_score(ads_from_page)
+    ww_score, ww_hits = worldwide_targeting_score(ads_from_page)
+    dup_score, dup_hits = duplicate_body_ratio(ads_from_page)
+    signals = {
+        "ads_sampled": len(ads_from_page),
+        "novel_vocab_ratio": round(novel_score, 3),
+        "novel_vocab_hits": novel_hits,
+        "worldwide_target_ratio": round(ww_score, 3),
+        "worldwide_target_hits": ww_hits,
+        "duplicate_body_ratio": round(dup_score, 3),
+        "duplicate_body_examples": dup_hits,
+    }
+
+    # High-confidence conditions only — stricter than manual scan.
+    if novel_score >= 0.4:
+        return True, "auto_novel_spam", signals
+    if ww_score >= 0.9 and dup_score >= 0.7:
+        return True, "auto_worldwide_duplicate_farm", signals
+    if dup_score >= 0.85 and len(ads_from_page) >= 15:
+        return True, "auto_duplicate_farm", signals
+    return False, None, signals

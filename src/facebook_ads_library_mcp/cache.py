@@ -127,7 +127,14 @@ def _conn() -> Iterator[sqlite3.Connection]:
 # ---------- ads ------------------------------------------------------------ #
 
 
-def save_ads(ads: list[dict[str, Any]]) -> int:
+def save_ads(ads: list[dict[str, Any]], *, auto_moderate: bool | None = None) -> int:
+    """Upsert a batch of ads into the cache.
+
+    If `auto_moderate` is True (or unset and env `FB_ADS_AUTO_MODERATE != "0"`),
+    every page whose ads were just touched is re-classified by the stricter
+    `auto_block_recommendation` heuristic; high-confidence spam farms are added
+    to `blocked_pages` in the same transaction.
+    """
     if not ads:
         return 0
     now = int(time.time())
@@ -148,6 +155,9 @@ def save_ads(ads: list[dict[str, Any]]) -> int:
         )
     if not rows:
         return 0
+
+    touched_page_ids = {r[1] for r in rows if r[1]}
+
     with _conn() as c:
         # Upsert: update data/fetched_at but keep first_seen_at from the original row.
         c.executemany(
@@ -162,7 +172,69 @@ def save_ads(ads: list[dict[str, Any]]) -> int:
             """,
             rows,
         )
+
+    if auto_moderate is None:
+        auto_moderate = os.environ.get("FB_ADS_AUTO_MODERATE", "1") != "0"
+    if auto_moderate and touched_page_ids:
+        _auto_moderate_pages(touched_page_ids)
+
     return len(rows)
+
+
+def _auto_moderate_pages(page_ids: set[str]) -> None:
+    """For each page in `page_ids` that isn't already blocked, reload all its
+    cached ads and run the stricter `auto_block_recommendation`. Blocks any
+    page that passes. Import lives inside the function to avoid cycles."""
+    from .spam_detection import auto_block_recommendation  # noqa: WPS433
+
+    with _conn() as c:
+        already_blocked = {
+            r["page_id"]
+            for r in c.execute(
+                f"SELECT page_id FROM blocked_pages WHERE page_id IN ({','.join('?' * len(page_ids))})",
+                tuple(page_ids),
+            ).fetchall()
+        }
+        candidates = page_ids - already_blocked
+        if not candidates:
+            return
+        # Batch-load all candidate pages' ads in one query.
+        placeholders = ",".join("?" for _ in candidates)
+        rows = c.execute(
+            f"SELECT page_id, page_name, data FROM ads WHERE page_id IN ({placeholders})",
+            tuple(candidates),
+        ).fetchall()
+
+    by_page: dict[str, list[dict[str, Any]]] = {}
+    names: dict[str, str] = {}
+    for r in rows:
+        pid = r["page_id"]
+        if not names.get(pid) and r["page_name"]:
+            names[pid] = r["page_name"]
+        try:
+            by_page.setdefault(pid, []).append(json.loads(r["data"]))
+        except json.JSONDecodeError:
+            continue
+
+    to_block: list[tuple[str, str, str, str]] = []
+    for pid, page_ads in by_page.items():
+        should, reason, signals = auto_block_recommendation(page_ads)
+        if should:
+            to_block.append(
+                (pid, names.get(pid, ""), reason or "auto_spam", json.dumps(signals, ensure_ascii=False))
+            )
+
+    if to_block:
+        now = int(time.time())
+        with _conn() as c:
+            c.executemany(
+                """
+                INSERT OR IGNORE INTO blocked_pages(
+                    page_id, page_name, reason, source, evidence, added_at
+                ) VALUES (?, ?, ?, 'auto_on_save', ?, """ + str(now) + """)
+                """,
+                to_block,
+            )
 
 
 def load_ads(
