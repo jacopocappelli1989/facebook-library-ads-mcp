@@ -82,10 +82,23 @@ def _build_search_params(
     return params
 
 
-async def _search_ads_impl(**kwargs: Any) -> dict[str, Any]:
+def _filter_blocked(ads: list[dict[str, Any]], blocked: set[str]) -> list[dict[str, Any]]:
+    if not blocked:
+        return ads
+    return [a for a in ads if str(a.get("page_id") or "") not in blocked]
+
+
+async def _search_ads_impl(
+    *, include_blocked: bool = False, **kwargs: Any
+) -> dict[str, Any]:
     params = _build_search_params(**kwargs)
     resp = await graph_get("/ads_archive", params)
-    cache.save_ads(resp.get("data") or [])
+    data = resp.get("data") or []
+    cache.save_ads(data)  # persist all ads (including blocked ones, for history)
+    if not include_blocked:
+        blocked = cache.get_blocked_page_ids()
+        filtered = _filter_blocked(data, blocked)
+        resp = {**resp, "data": filtered, "_blocked_filtered": len(data) - len(filtered)}
     return resp
 
 
@@ -106,6 +119,7 @@ def register(mcp: FastMCP) -> None:
         unmask_removed_content: bool = False,
         fields: list[str] | None = None,
         limit: int = 25,
+        include_blocked: bool = False,
     ) -> dict[str, Any]:
         """Search the Facebook Ads Library (`/ads_archive`).
 
@@ -113,7 +127,9 @@ def register(mcp: FastMCP) -> None:
         Non-political ads are only returned for EU countries.
 
         Provide `search_terms` (≤100 chars) and/or `search_page_ids` (≤10).
-        Returns raw Graph API response with `data` + `paging`.
+
+        Blocked pages (see `list_blocked_pages`) are filtered out by default.
+        Set `include_blocked=True` to see them.
         """
         return await _search_ads_impl(
             ad_reached_countries=ad_reached_countries,
@@ -130,6 +146,7 @@ def register(mcp: FastMCP) -> None:
             unmask_removed_content=unmask_removed_content,
             fields=fields,
             limit=limit,
+            include_blocked=include_blocked,
         )
 
     @mcp.tool()
@@ -149,11 +166,12 @@ def register(mcp: FastMCP) -> None:
         fields: list[str] | None = None,
         page_size: int = 100,
         max_results: int = 500,
+        include_blocked: bool = False,
     ) -> dict[str, Any]:
         """Paginate through `/ads_archive` until `max_results` or the cursor ends.
 
-        Safer default of `max_results=500` to avoid runaway pagination. Returns
-        `{"data": [...], "fetched": N, "pages": N, "stopped_reason": "..."}`.
+        Blocked pages are filtered out by default; set `include_blocked=True`
+        to see them.
         """
         all_data: list[dict[str, Any]] = []
         first = await _search_ads_impl(
@@ -171,6 +189,7 @@ def register(mcp: FastMCP) -> None:
             unmask_removed_content=unmask_removed_content,
             fields=fields,
             limit=page_size,
+            include_blocked=True,  # we filter once at the end for efficiency
         )
         all_data.extend(first.get("data", []))
         pages = 1
@@ -186,11 +205,19 @@ def register(mcp: FastMCP) -> None:
         if next_url and len(all_data) >= max_results:
             reason = "max_results_reached"
             all_data = all_data[:max_results]
+        blocked_count = 0
+        if not include_blocked:
+            blocked = cache.get_blocked_page_ids()
+            if blocked:
+                before = len(all_data)
+                all_data = _filter_blocked(all_data, blocked)
+                blocked_count = before - len(all_data)
         return {
             "data": all_data,
             "fetched": len(all_data),
             "pages": pages,
             "stopped_reason": reason,
+            "blocked_pages_filtered": blocked_count,
         }
 
     @mcp.tool()

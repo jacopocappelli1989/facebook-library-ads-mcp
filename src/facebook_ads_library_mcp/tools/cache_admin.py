@@ -47,6 +47,7 @@ def register(mcp: FastMCP) -> None:
         product_contexts: list[str] | None = None,
         max_scan: int = 10000,
         max_results: int = 500,
+        include_blocked: bool = False,
     ) -> dict[str, Any]:
         """Run advanced filters over the LOCAL cache only — zero API calls.
 
@@ -64,6 +65,7 @@ def register(mcp: FastMCP) -> None:
             page_name_contains=brand_name_contains,
             since_seconds_ago=since_seconds_ago,
             limit=max_scan,
+            exclude_blocked=not include_blocked,
         )
         filtered = _apply_client_filters(
             loaded,

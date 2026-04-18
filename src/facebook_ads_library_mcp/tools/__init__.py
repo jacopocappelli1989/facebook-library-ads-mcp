@@ -13,6 +13,7 @@ def register_all(mcp: FastMCP) -> None:
         discovery,
         export,
         landing,
+        moderation,
         search,
         shopify,
         trends,
@@ -29,3 +30,4 @@ def register_all(mcp: FastMCP) -> None:
     shopify.register(mcp)
     trends.register(mcp)
     validate.register(mcp)
+    moderation.register(mcp)

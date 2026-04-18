@@ -50,13 +50,22 @@ def contains_any(text: str, keywords: Iterable[str]) -> bool:
 # ---------- date helpers --------------------------------------------------- #
 
 def _parse_ts(value: str | None) -> datetime | None:
+    """Parse a Graph API timestamp to an always-TZ-aware datetime (UTC).
+
+    Graph returns a mix of formats: `"2024-11-03T08:00:00+0000"`,
+    `"2024-11-03"` (date-only), and occasionally plain ISO. We coerce the
+    result to UTC-aware so arithmetic with `datetime.now(timezone.utc)`
+    doesn't raise "can't subtract offset-naive and offset-aware datetimes".
+    """
     if not value:
         return None
-    # Graph API returns ISO 8601 in UTC, e.g. "2024-11-03T08:00:00+0000"
     try:
-        return datetime.fromisoformat(value.replace("+0000", "+00:00"))
+        dt = datetime.fromisoformat(value.replace("+0000", "+00:00"))
     except ValueError:
         return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt
 
 
 def days_since(value: str | None, *, now: datetime | None = None) -> int | None:

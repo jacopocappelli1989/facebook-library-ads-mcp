@@ -65,9 +65,21 @@ CREATE TABLE IF NOT EXISTS query_log (
     result_count INTEGER NOT NULL,
     ran_at INTEGER NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS blocked_pages (
+    page_id TEXT PRIMARY KEY,
+    page_name TEXT,
+    reason TEXT,
+    source TEXT,
+    evidence TEXT,
+    added_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ix_blocked_reason ON blocked_pages(reason);
 """
 
-VALID_TABLES = frozenset({"ads", "landing_analyses", "page_stats_cache", "query_log"})
+VALID_TABLES = frozenset(
+    {"ads", "landing_analyses", "page_stats_cache", "query_log", "blocked_pages"}
+)
 
 
 def cache_dir() -> Path:
@@ -160,6 +172,7 @@ def load_ads(
     page_name_contains: str | None = None,
     since_seconds_ago: int | None = None,
     limit: int | None = None,
+    exclude_blocked: bool = True,
 ) -> list[dict[str, Any]]:
     sql = "SELECT data FROM ads WHERE 1=1"
     args: list[Any] = []
@@ -177,12 +190,79 @@ def load_ads(
         cutoff = int(time.time()) - since_seconds_ago
         sql += " AND fetched_at >= ?"
         args.append(cutoff)
+    if exclude_blocked:
+        sql += " AND page_id NOT IN (SELECT page_id FROM blocked_pages)"
     sql += " ORDER BY fetched_at DESC"
     if limit:
         sql += f" LIMIT {int(limit)}"
     with _conn() as c:
         rows = c.execute(sql, args).fetchall()
     return [json.loads(r["data"]) for r in rows]
+
+
+# ---------- blocked pages ------------------------------------------------- #
+
+
+def block_page(
+    page_id: str,
+    *,
+    page_name: str = "",
+    reason: str = "manual",
+    source: str = "manual",
+    evidence: str = "",
+) -> bool:
+    """Add a page_id to the block list. Returns True if newly blocked, False if
+    already blocked."""
+    with _conn() as c:
+        existing = c.execute(
+            "SELECT 1 FROM blocked_pages WHERE page_id = ?", (page_id,)
+        ).fetchone()
+        if existing:
+            return False
+        c.execute(
+            """
+            INSERT INTO blocked_pages(page_id, page_name, reason, source, evidence, added_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (page_id, page_name, reason, source, evidence, int(time.time())),
+        )
+    return True
+
+
+def unblock_page(page_id: str) -> bool:
+    """Remove a page_id from the block list. Returns True if a row was deleted."""
+    with _conn() as c:
+        cur = c.execute("DELETE FROM blocked_pages WHERE page_id = ?", (page_id,))
+        deleted = cur.rowcount
+    return deleted > 0
+
+
+def list_blocked_pages(limit: int = 1000) -> list[dict[str, Any]]:
+    with _conn() as c:
+        rows = c.execute(
+            """
+            SELECT page_id, page_name, reason, source, evidence, added_at
+            FROM blocked_pages
+            ORDER BY added_at DESC
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def get_blocked_page_ids() -> set[str]:
+    with _conn() as c:
+        rows = c.execute("SELECT page_id FROM blocked_pages").fetchall()
+    return {r["page_id"] for r in rows}
+
+
+def is_blocked(page_id: str) -> bool:
+    with _conn() as c:
+        row = c.execute(
+            "SELECT 1 FROM blocked_pages WHERE page_id = ?", (page_id,)
+        ).fetchone()
+    return row is not None
 
 
 # ---------- landing analyses ---------------------------------------------- #

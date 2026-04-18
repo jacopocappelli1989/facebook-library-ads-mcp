@@ -137,6 +137,7 @@ def register(mcp: FastMCP) -> None:
         page_size: int = 100,
         max_results: int = 500,
         max_raw_fetched: int = 2000,
+        include_blocked: bool = False,
     ) -> dict[str, Any]:
         """One-shot search with server-side + client-side filtering.
 
@@ -145,7 +146,8 @@ def register(mcp: FastMCP) -> None:
 
         Client-side (post-filter): text length, keyword AND/OR/exclude, brand name
         substring, active/inactive, days active window, spend bands (EU political),
-        niche/product-context classification.
+        niche/product-context classification, **blocked pages** (see
+        `list_blocked_pages`).
 
         `max_raw_fetched` caps pages-fetched-before-filter so a strict filter doesn't
         paginate forever. `max_results` caps the filtered output.
@@ -212,6 +214,16 @@ def register(mcp: FastMCP) -> None:
             niches=niches,
             product_contexts=product_contexts,
         )
+        blocked_count = 0
+        if not include_blocked:
+            blocked = cache.get_blocked_page_ids()
+            if blocked:
+                before = len(filtered)
+                filtered = [
+                    a for a in filtered if str(a.get("page_id") or "") not in blocked
+                ]
+                blocked_count = before - len(filtered)
+
         truncated = False
         if len(filtered) > max_results:
             filtered = filtered[:max_results]
@@ -221,6 +233,7 @@ def register(mcp: FastMCP) -> None:
             "raw_fetched": len(raw),
             "pages_fetched": pages,
             "filtered_count": len(filtered),
+            "blocked_pages_filtered": blocked_count,
             "truncated_to_max_results": truncated,
             "data": filtered,
         }
